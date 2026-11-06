@@ -39,6 +39,18 @@ const CREATE_FLOW_OPTIONS: { value: string; label: string }[] = [
 /** 与后端 floor_logic.TERMINAL 一致：终态预订不再占用桌台，弹窗应走散客/新建流程 */
 const TERMINAL_FLOWS = new Set<GuestFlowStatus>(["left", "cancelled", "noshow"]);
 
+/** 客人状态中文名（与 i18n flow 命名空间保持一致） */
+const FLOW_LABEL: Record<GuestFlowStatus, string> = {
+  pending_confirm: "待确认",
+  waiting: "待处理",
+  confirmed: "已确认",
+  arrived: "入座",
+  seated: "入座",
+  left: "已离店",
+  noshow: "爽约",
+  cancelled: "已取消",
+};
+
 // 与日历页一致：节气/节日徽标（本地时间）
 const SOLAR_TERMS = [
   "小寒",
@@ -506,11 +518,6 @@ export function AdminFloorPage() {
     return /^\d+$/.test(g.id) ? g.id : null;
   }, [selectedTable, guests]);
 
-  const selectedGuest = useMemo(() => {
-    if (!selectedReservationId) return null;
-    return guests.find((g) => g.id === selectedReservationId) ?? null;
-  }, [selectedReservationId, guests]);
-
   /** 房间型桌台同时段可能有多组客人，需列出全部以便逐组操作 */
   const selectedParties = useMemo(() => {
     if (!selectedTable) return [] as GuestCard[];
@@ -520,6 +527,16 @@ export function AdminFloorPage() {
   }, [selectedTable, guests]);
 
   const selectedRoomUsage = selectedTable?.tableType === "room" ? selectedTable.roomUsage : undefined;
+
+  /** 是否还能继续安排客人：房间看剩余座位；普通桌一桌一单，占用后不可再加 */
+  const canSeatMore = useMemo(() => {
+    if (!selectedTable) return false;
+    if (selectedTable.tableType === "room") {
+      const u = selectedTable.roomUsage;
+      return u ? u.free > 0 : true;
+    }
+    return selectedTable.status === "empty";
+  }, [selectedTable]);
 
   /** 新建/编辑预订时，房间剩余座位提示 */
   const roomSeatHint = useMemo(() => {
@@ -562,8 +579,6 @@ export function AdminFloorPage() {
     period,
     op,
   ]);
-
-  const selectedFlow = selectedGuest?.flow ?? null;
 
   const openEditReservationModal = useCallback(
     async (
@@ -806,17 +821,33 @@ export function AdminFloorPage() {
     setRev((x) => x + 1);
   }
 
-  async function leaveWalkin(tableCode: string, reservationId?: string | null) {
+  async function leaveWalkin(tableCode: string, guestId?: string | null) {
+    const json: {
+      table_code: string;
+      reservation_id?: number;
+      occupancy_id?: number;
+    } = { table_code: tableCode };
+    // 散客占位记录 id 形如 walkin-12；其余为预订 id
+    const occMatch = /^walkin-(\d+)$/.exec(guestId ?? "");
+    if (occMatch) {
+      json.occupancy_id = Number(occMatch[1]);
+    } else if (guestId && /^\d+$/.test(guestId)) {
+      json.reservation_id = Number(guestId);
+    }
     await apiFetch("/api/admin/floor/walkin/leave", {
       method: "POST",
-      json: {
-        table_code: tableCode,
-        ...(reservationId && /^\d+$/.test(reservationId)
-          ? { reservation_id: Number(reservationId) }
-          : {}),
-      },
+      json,
     });
     setRev((x) => x + 1);
+  }
+
+  /** 清单里某组客人「离席」：占位记录走散客接口，预订走状态流转 */
+  async function leaveGuest(guestId: string) {
+    if (/^walkin-\d+$/.test(guestId)) {
+      await leaveWalkin(selectedTable?.id ?? "", guestId);
+      return;
+    }
+    await quickSetFlow("left", guestId);
   }
 
   async function sendGuestConfirmSms(guest: GuestCard) {
@@ -1584,7 +1615,9 @@ export function AdminFloorPage() {
                     </span>
                   )}
                 </p>
-                {selectedTable.guestHint && <p className="mt-1 text-sm text-stone-600">客人：{selectedTable.guestHint}</p>}
+                {selectedTable.guestHint && selectedTable.tableType !== "room" && (
+              <p className="mt-1 text-sm text-stone-600">客人：{selectedTable.guestHint}</p>
+            )}
                 {selectedRoomUsage && (
                   <div className="mt-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
                     <p>
@@ -1613,7 +1646,6 @@ export function AdminFloorPage() {
                     )}
                   </div>
                 )}
-                {selectedGuest?.note && <p className="mt-1 text-xs text-stone-600">备注：{selectedGuest.note}</p>}
                 {selectedTable.isLocked && (
                   <p className="mt-1 text-xs text-amber-700">已锁定（{selectedTable.lockedBy || "未知"}）</p>
                 )}
@@ -1622,12 +1654,12 @@ export function AdminFloorPage() {
                 关闭
               </button>
             </div>
-            {selectedTable.tableType === "room" && selectedParties.length > 0 && (
+            {selectedParties.length > 0 && (
               <div className="mt-3 rounded-xl border border-stone-200">
                 <p className="border-b border-stone-200 px-3 py-2 text-xs font-medium text-stone-700">
                   本桌客人（{selectedParties.length} 组）
                 </p>
-                <ul className="max-h-56 divide-y divide-stone-100 overflow-y-auto">
+                <ul className="max-h-64 divide-y divide-stone-100 overflow-y-auto">
                   {selectedParties.map((g) => (
                     <li key={g.id} className="flex items-center justify-between gap-3 px-3 py-2">
                       <div className="min-w-0">
@@ -1636,74 +1668,120 @@ export function AdminFloorPage() {
                           <span className="ml-2 text-xs text-stone-500">
                             {g.time} · {g.party} 位
                           </span>
+                          <span className="ml-2 rounded-full bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium text-stone-600">
+                            {FLOW_LABEL[g.flow] ?? g.flow}
+                          </span>
                         </p>
                         {g.note && <p className="truncate text-[11px] text-stone-500">备注：{g.note}</p>}
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        {g.flow === "arrived" && (
-                          <button
-                            type="button"
-                            onClick={() => void leaveWalkin(selectedTable.id, g.id)}
-                            className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
-                          >
-                            离席
-                          </button>
-                        )}
+                      <div className="flex shrink-0 items-center gap-1">
                         {g.flow === "waiting" && (
                           <button
                             type="button"
-                            onClick={() => void quickSetFlow("confirmed", g.id)}
+                            onClick={() => void quickSetFlow("arrived", g.id)}
                             className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
                           >
-                            确认
+                            入座
                           </button>
+                        )}
+                        {g.flow === "confirmed" && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void quickSetFlow("arrived", g.id)}
+                              className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                            >
+                              入座
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void quickSetFlow("waiting", g.id)}
+                              className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                            >
+                              待处理
+                            </button>
+                          </>
+                        )}
+                        {g.flow === "arrived" && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void leaveGuest(g.id)}
+                              className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                            >
+                              离席
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void quickSetFlow("waiting", g.id)}
+                              className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                            >
+                              待处理
+                            </button>
+                          </>
                         )}
                         <button
                           type="button"
-                          onClick={() => void goEditReservation(g.id)}
-                          className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                          onClick={() => void quickSetFlow("cancelled", g.id)}
+                          className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50"
                         >
-                          编辑
+                          取消
                         </button>
+                        {selectedParties.length > 1 && /^\d+$/.test(g.id) && (
+                          <button
+                            type="button"
+                            onClick={() => void goEditReservation(g.id)}
+                            className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                          >
+                            编辑
+                          </button>
+                        )}
                       </div>
                     </li>
                   ))}
                 </ul>
               </div>
             )}
-            {selectedReservationId ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button type="button" onClick={() => goEditReservation(selectedReservationId)} className="rounded-xl bg-brand-coral px-4 py-2 text-sm font-medium text-white">编辑预订</button>
-                <button type="button" onClick={() => void quickSetFlow("waiting")} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm">待处理</button>
-                <button type="button" onClick={() => void quickSetFlow("arrived")} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm">入座</button>
-                <button type="button" onClick={() => void quickSetFlow("left")} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm">离席</button>
-                <button type="button" onClick={() => void quickSetFlow("cancelled")} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-red-700">取消</button>
-                {selectedTable.isLocked ? (
-                  <button type="button" onClick={() => void unlockTable(selectedTable.id)} className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">解除锁定</button>
-                ) : (
-                  <button type="button" onClick={() => void lockTable(selectedTable.id)} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-stone-700">锁定桌台</button>
-                )}
-              </div>
-            ) : (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {selectedTable.tableType === "room" ? (
-                  <button type="button" onClick={() => openCreateReservation(selectedTable.id, true)} className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700">
-                    散客入席（房间）
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {selectedParties.length === 1 && /^\d+$/.test(selectedParties[0].id) && (
+                <button
+                  type="button"
+                  onClick={() => void goEditReservation(selectedParties[0].id)}
+                  className="rounded-xl bg-brand-coral px-4 py-2 text-sm font-medium text-white"
+                >
+                  编辑预订
+                </button>
+              )}
+              {canSeatMore ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => openCreateReservation(selectedTable.id)}
+                    className="rounded-xl bg-brand-coral px-4 py-2 text-sm font-medium text-white"
+                  >
+                    新建预订
                   </button>
-                ) : selectedTable.status === "arrived" ? (
-                  <button type="button" onClick={() => void leaveWalkin(selectedTable.id)} className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700">散客离席</button>
-                ) : (
-                  <button type="button" onClick={() => openCreateReservation(selectedTable.id, true)} className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700">散客入席</button>
-                )}
-                <button type="button" onClick={() => openCreateReservation(selectedTable.id)} className="rounded-xl bg-brand-coral px-4 py-2 text-sm font-medium text-white">新建预订</button>
-                {selectedTable.isLocked ? (
-                  <button type="button" onClick={() => void unlockTable(selectedTable.id)} className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">解除锁定</button>
-                ) : (
-                  <button type="button" onClick={() => void lockTable(selectedTable.id)} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-stone-700">锁定桌台</button>
-                )}
-              </div>
-            )}
-            {selectedFlow && <p className="mt-2 text-xs text-stone-500">当前预订状态：{selectedFlow}</p>}
+                  <button
+                    type="button"
+                    onClick={() => openCreateReservation(selectedTable.id, true)}
+                    className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700"
+                  >
+                    散客入席
+                  </button>
+                </>
+              ) : (
+                <span className="rounded-xl bg-stone-100 px-3 py-2 text-xs text-stone-500">
+                  {selectedTable.tableType === "room"
+                    ? `座位已满（${selectedRoomUsage?.used ?? 0}/${selectedRoomUsage?.capacity ?? 0}）`
+                    : "该桌已被占用"}
+                </span>
+              )}
+              {selectedTable.isLocked ? (
+                <button type="button" onClick={() => void unlockTable(selectedTable.id)} className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">解除锁定</button>
+              ) : (
+                <button type="button" onClick={() => void lockTable(selectedTable.id)} className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-stone-700">锁定桌台</button>
+              )}
+            </div>
           </div>
         </div>
       )}
