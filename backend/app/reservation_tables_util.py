@@ -14,15 +14,19 @@ def _dedupe_keep_order(values: list[int]) -> list[int]:
     return out
 
 
-def parse_assigned_table_ids(reservation: Reservation) -> list[int]:
-    """返回预订关联的全部桌台 id（兼容旧字段 assigned_table_id）。"""
+def parse_table_ids_csv(
+    assigned_table_id: int | None,
+    assigned_table_ids: str | None,
+) -> list[int]:
+    """解析「首桌 id + CSV 多桌 id」为去重后的桌台 id 列表。
+
+    与 :func:`parse_assigned_table_ids` 语义一致，但不依赖 ORM 实例，
+    可用于仅 select 少数字段的轻量查询。
+    """
     values: list[int] = []
-    if (
-        reservation.assigned_table_id is not None
-        and reservation.assigned_table_id > 0
-    ):
-        values.append(int(reservation.assigned_table_id))
-    raw = (reservation.assigned_table_ids or "").strip()
+    if assigned_table_id is not None and int(assigned_table_id) > 0:
+        values.append(int(assigned_table_id))
+    raw = (assigned_table_ids or "").strip()
     if raw:
         for part in raw.split(","):
             p = part.strip()
@@ -30,6 +34,14 @@ def parse_assigned_table_ids(reservation: Reservation) -> list[int]:
                 continue
             values.append(int(p))
     return _dedupe_keep_order(values)
+
+
+def parse_assigned_table_ids(reservation: Reservation) -> list[int]:
+    """返回预订关联的全部桌台 id（兼容旧字段 assigned_table_id）。"""
+    return parse_table_ids_csv(
+        reservation.assigned_table_id,
+        reservation.assigned_table_ids,
+    )
 
 
 def set_assigned_table_ids(reservation: Reservation, table_ids: list[int]) -> None:

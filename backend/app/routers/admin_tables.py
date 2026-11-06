@@ -7,6 +7,8 @@ from ..models import DiningTable, Reservation, User
 from ..reservation_schema_compat import ensure_assigned_table_ids_column
 from ..reservation_tables_util import parse_assigned_table_ids
 from ..schemas import DiningTableCreate, DiningTableItem, DiningTableUpdate
+from ..table_capacity_util import normalize_table_type
+from ..table_schema_compat import ensure_table_type_column
 
 router = APIRouter(
     prefix="/api/admin/dining-tables",
@@ -31,6 +33,7 @@ def _item(r: DiningTable) -> DiningTableItem:
         sort_order=r.sort_order,
         capacity=r.capacity,
         is_active=r.is_active,
+        table_type=normalize_table_type(getattr(r, "table_type", None)),
     )
 
 
@@ -40,6 +43,7 @@ def list_dining_tables(
     _: object = Depends(require_staff),
 ):
     """餐位列表（含平面图坐标），供下拉与餐位管理页共用。"""
+    ensure_table_type_column(db)
     rows = (
         db.query(DiningTable)
         .order_by(DiningTable.sort_order, DiningTable.id)
@@ -54,6 +58,7 @@ def create_dining_table(
     db: Session = Depends(get_db),
     _: object = Depends(require_staff),
 ):
+    ensure_table_type_column(db)
     code = body.code.strip()
     if db.query(DiningTable).filter(DiningTable.code == code).first():
         raise HTTPException(status_code=400, detail="桌台编号已存在")
@@ -67,6 +72,7 @@ def create_dining_table(
         sort_order=body.sort_order,
         capacity=body.capacity,
         is_active=body.is_active,
+        table_type=normalize_table_type(body.table_type),
     )
     db.add(t)
     db.commit()
@@ -81,6 +87,7 @@ def update_dining_table(
     db: Session = Depends(get_db),
     user: User = Depends(require_staff),
 ):
+    ensure_table_type_column(db)
     t = db.get(DiningTable, table_id)
     if not t:
         raise HTTPException(status_code=404, detail="桌台不存在")
@@ -117,6 +124,8 @@ def update_dining_table(
         t.capacity = int(data["capacity"])
     if "is_active" in data and data["is_active"] is not None:
         t.is_active = bool(data["is_active"])
+    if "table_type" in data and data["table_type"] is not None:
+        t.table_type = normalize_table_type(data["table_type"])
     db.add(t)
     db.commit()
     db.refresh(t)

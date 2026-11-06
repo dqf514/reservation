@@ -29,6 +29,11 @@ from ..note_quick_options_util import (
     read_note_quick_options,
     write_note_quick_options,
 )
+from ..table_capacity_util import (
+    assert_room_capacity,
+    enabled_periods,
+    is_room_table,
+)
 from ..schemas import (
     AdminReservationCreate,
     NoteQuickOptionsUpdate,
@@ -242,6 +247,21 @@ def create_reservation_admin(
                 detail=f"桌台已被 {lock.locked_by_username} 锁定",
             )
         requested_ids.append(int(t.id))
+
+    # 房间型桌台：同时段座位池合并计算（预订 + 散客），超出座位数直接拒绝。
+    _periods = enabled_periods(db)
+    for tid in requested_ids:
+        rt = db.get(DiningTable, tid)
+        if not rt or not is_room_table(rt):
+            continue
+        assert_room_capacity(
+            db,
+            table=rt,
+            reservation_date=body.reservation_date,
+            time_slot=body.time_slot.strip(),
+            party_size=body.party_size,
+            periods=_periods,
+        )
 
     flow = (body.flow_status or "confirmed").strip()
     validate_staff_reservation_datetime(

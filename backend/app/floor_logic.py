@@ -19,12 +19,17 @@ from .periods import (
     time_in_period_db,
     time_in_period_with_periods,
 )
+from .reservation_status import TERMINAL  # noqa: F401  (兼容既有 `floor_logic.TERMINAL` 导入)
 from .reservation_tables_util import (
     parse_assigned_table_ids,
     set_assigned_table_ids,
 )
-
-TERMINAL = frozenset({"left", "noshow", "cancelled"})
+from .table_capacity_util import (
+    compute_room_usage,
+    enabled_periods,
+    is_room_table,
+    room_has_free_seat,
+)
 _PHONE_RE = re.compile(r"^1\d{10}$")
 
 
@@ -92,10 +97,79 @@ def active_reservation_for_table(
     return None
 
 
+def _table_shape(dt: DiningTable) -> str:
+    return dt.shape if dt.shape in ("circle", "square", "rect_h", "rect_v") else "circle"
+
+
+def _build_room_node(
+    dt: DiningTable,
+    *,
+    reservation_date: str,
+    periods: list,
+    period: str,
+    day_rows: list,
+    occ_rows: list,
+    lock: TableLock | None,
+) -> dict:
+    """房间节点：同一时段内多组客人共享座位池，展示聚合计数。"""
+    usage = compute_room_usage(
+        table=dt,
+        reservation_date=reservation_date,
+        periods=periods,
+        period=period,
+        reservations=day_rows,
+        occupancies=occ_rows,
+    )
+    if usage.occupancy_count > 0:
+        status = "arrived"
+    elif usage.reservation_count > 0:
+        status = "reserved"
+    elif usage.capacity > 0 and usage.used_seats >= usage.capacity:
+        status = "unavailable"
+    else:
+        status = "empty"
+
+    times: list[str] = []
+    for r in day_rows:
+        if r.flow_status in TERMINAL:
+            continue
+        if int(dt.id) not in parse_assigned_table_ids(r):
+            continue
+        if not time_in_period_with_periods(periods, r.time_slot, period):
+            continue
+        times.append(r.time_slot)
+    for occ in occ_rows:
+        if int(occ.table_id) != int(dt.id):
+            continue
+        if not time_in_period_with_periods(periods, occ.time_slot, period):
+            continue
+        times.append(occ.time_slot)
+    times.sort()
+
+    return {
+        "id": dt.code,
+        "dbId": dt.id,
+        "label": dt.label,
+        "x": dt.pos_x,
+        "y": dt.pos_y,
+        "size": dt.pos_size,
+        "capacity": dt.capacity,
+        "shape": _table_shape(dt),
+        "status": status,
+        "time": times[0] if times else None,
+        "ratio": f"{usage.used_seats}/{usage.capacity}",
+        "guestHint": f"{usage.party_count} 桌" if usage.party_count else None,
+        "isLocked": bool(lock),
+        "lockedBy": lock.locked_by_username if lock else None,
+        "tableType": "room",
+        "roomUsage": usage.to_dict(),
+    }
+
+
 def build_floor_tables(
     db: Session, *, reservation_date: str, period: str
 ) -> list[dict]:
-    periods_enabled = [p for p in list_operating_periods(db) if p.enabled]
+    periods_enabled = enabled_periods(db)
     day_rows = (
         db.query(Reservation)
         .filter(Reservation.reservation_date == reservation_date)
@@ -139,17 +213,31 @@ def build_floor_tables(
                 "y": dt.pos_y,
                 "size": dt.pos_size,
                 "capacity": dt.capacity,
-                "shape": dt.shape
-                if dt.shape in ("circle", "square", "rect_h", "rect_v")
-                else "circle",
+                "shape": _table_shape(dt),
                 "status": "unavailable",
+                "tableType": "standard",
             }
             out.append(node)
             continue
 
+        lock = locks_by_table.get(dt.id)
+
+        if is_room_table(dt):
+            out.append(
+                _build_room_node(
+                    dt,
+                    reservation_date=reservation_date,
+                    periods=periods_enabled,
+                    period=period,
+                    day_rows=day_rows,
+                    occ_rows=occ_rows,
+                    lock=lock,
+                )
+            )
+            continue
+
         res = table_to_res.get(dt.id)
         occ = occ_by_table.get(dt.id)
-        lock = locks_by_table.get(dt.id)
         st = "empty"
         time_s: str | None = None
         ratio: str | None = None
@@ -176,15 +264,14 @@ def build_floor_tables(
                 "y": dt.pos_y,
                 "size": dt.pos_size,
                 "capacity": dt.capacity,
-                "shape": dt.shape
-                if dt.shape in ("circle", "square", "rect_h", "rect_v")
-                else "circle",
+                "shape": _table_shape(dt),
                 "status": st,
                 "time": time_s,
                 "ratio": ratio,
                 "guestHint": guest_hint,
                 "isLocked": bool(lock),
                 "lockedBy": lock.locked_by_username if lock else None,
+                "tableType": "standard",
             }
         )
     return out
@@ -200,13 +287,14 @@ def pick_random_idle_table(
     """在指定时刻随机选择一个空闲桌台并返回。
 
     空闲判定：该桌台在该日期与时段内没有处于非终态的预订。
+    房间型桌台（room）只在没有普通桌可用时作为兜底，且需同时段仍有空余座位。
     """
 
     period = period_key_for_time_slot(db, time_slot)
     if not period:
         return None
 
-    periods_enabled = [p for p in list_operating_periods(db) if p.enabled]
+    periods_enabled = enabled_periods(db)
     day_rows = (
         db.query(Reservation)
         .filter(Reservation.reservation_date == reservation_date)
@@ -223,12 +311,25 @@ def pick_random_idle_table(
         .order_by(DiningTable.sort_order, DiningTable.id)
         .all()
     )
-    candidates: list[DiningTable] = []
+    standard_candidates: list[DiningTable] = []
+    room_candidates: list[DiningTable] = []
     for dt in tables:
         if dt.capacity < party_size:
             continue
+        if is_room_table(dt):
+            if room_has_free_seat(
+                db,
+                table=dt,
+                reservation_date=reservation_date,
+                time_slot=time_slot,
+                party_size=party_size,
+                periods=periods_enabled,
+            ):
+                room_candidates.append(dt)
+            continue
         if dt.id not in table_to_res:
-            candidates.append(dt)
+            standard_candidates.append(dt)
+    candidates = standard_candidates or room_candidates
     if not candidates:
         return None
     return random.choice(candidates)

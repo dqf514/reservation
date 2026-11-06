@@ -141,6 +141,12 @@ class DiningTable(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     capacity: Mapped[int] = mapped_column(Integer, default=4)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # standard=普通桌（同时段一桌一单，独占）；room=房间/包厢（同时段多组客人共享座位池）
+    table_type: Mapped[str] = mapped_column(
+        String(16),
+        default="standard",
+        index=True,
+    )
 
     reservations: Mapped[list["Reservation"]] = relationship(
         back_populates="table",

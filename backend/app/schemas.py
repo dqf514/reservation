@@ -172,6 +172,14 @@ class FloorLockBody(BaseModel):
     table_code: str = Field(min_length=1, max_length=32)
 
 
+class FloorWalkinLeaveBody(BaseModel):
+    """散客离席：房间可有多组散客，需指定要离席的那一组。"""
+
+    table_code: str = Field(min_length=1, max_length=32)
+    occupancy_id: int | None = None
+    reservation_id: int | None = None
+
+
 class FloorWalkinSeatBody(BaseModel):
     table_code: str = Field(min_length=1, max_length=32)
     reservation_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
@@ -192,6 +200,8 @@ class DiningTableItem(BaseModel):
     sort_order: int
     capacity: int
     is_active: bool
+    # standard=普通桌（一桌一单）；room=房间/包厢（同时段多组客人共享座位池）
+    table_type: str = "standard"
 
 
 class DiningTableCreate(BaseModel):
@@ -210,6 +220,7 @@ class DiningTableCreate(BaseModel):
     sort_order: int = Field(default=0, ge=-9999, le=9999)
     capacity: int = Field(default=4, ge=1, le=99)
     is_active: bool = True
+    table_type: str = Field(default="standard", pattern=r"^(standard|room)$")
 
 
 class DiningTableUpdate(BaseModel):
@@ -229,6 +240,7 @@ class DiningTableUpdate(BaseModel):
     sort_order: int | None = Field(default=None, ge=-9999, le=9999)
     capacity: int | None = Field(default=None, ge=1, le=99)
     is_active: bool | None = None
+    table_type: str | None = Field(default=None, pattern=r"^(standard|room)$")
 
 
 class BrandingUpdate(BaseModel):
@@ -443,6 +455,9 @@ class CalendarMonthResponse(BaseModel):
     days: list[CalendarDayCount]
     month_total_count: int = 0
     month_total_party: int = 0
+    # 按桌台统计时的过滤条件（None=全店）
+    table_code: str | None = None
+    table_label: str | None = None
 
 
 class CalendarMonthlyTrendItem(BaseModel):
@@ -454,6 +469,9 @@ class CalendarMonthlyTrendItem(BaseModel):
 
 class CalendarMonthlyTrendResponse(BaseModel):
     items: list[CalendarMonthlyTrendItem] = Field(default_factory=list)
+    # 按桌台统计时的过滤条件（None=全店）
+    table_code: str | None = None
+    table_label: str | None = None
 
 
 class OperatingPeriodItemDTO(BaseModel):

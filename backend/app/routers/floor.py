@@ -24,9 +24,25 @@ from ..reservation_schema_compat import (
     ensure_assigned_table_ids_column,
 )
 from ..reservation_tables_util import parse_assigned_table_ids
-from ..schemas import FloorLockBody, FloorSwapBody, FloorWalkinSeatBody
+from ..schemas import (
+    FloorLockBody,
+    FloorSwapBody,
+    FloorWalkinLeaveBody,
+    FloorWalkinSeatBody,
+)
+from ..table_capacity_util import (
+    assert_room_capacity,
+    enabled_periods,
+    is_room_table,
+)
 
 router = APIRouter(prefix="/api/admin/floor", tags=["floor"])
+
+_WALKIN_NAMES = ("walk-in", "walkin", "散客")
+
+
+def _is_walkin_name(name: str | None) -> bool:
+    return (name or "").strip().lower() in _WALKIN_NAMES
 
 
 def _get_table_by_code(db: Session, table_code: str) -> DiningTable:
@@ -183,6 +199,35 @@ def post_walkin_seat(
 ):
     t = _get_table_by_code(db, body.table_code)
     _ensure_can_mutate_lock(db, t, user)
+    now = datetime.now()
+
+    if is_room_table(t):
+        # 房间：允许多组散客同时在场，按「时段座位池」合并计算（预订 + 散客）。
+        if body.party_size > t.capacity:
+            raise HTTPException(status_code=400, detail="人数超过该房间座位数")
+        assert_room_capacity(
+            db,
+            table=t,
+            reservation_date=body.reservation_date,
+            time_slot=now.strftime("%H:%M"),
+            party_size=body.party_size,
+            periods=enabled_periods(db),
+        )
+        db.add(
+            TableOccupancy(
+                table_id=t.id,
+                business_date=body.reservation_date,
+                time_slot=now.strftime("%H:%M"),
+                party_size=body.party_size,
+                note=(body.note or "").strip() or None,
+                status="seated",
+                created_by_user_id=user.id,
+                created_by_username=user.username,
+            )
+        )
+        db.commit()
+        return {"ok": True}
+
     if body.party_size > t.capacity:
         raise HTTPException(status_code=400, detail="人数超过该桌台容量")
 
@@ -199,7 +244,6 @@ def post_walkin_seat(
         raise HTTPException(status_code=400, detail="该桌台已有散客入席")
 
     policy = get_or_create_floor_policy_settings(db)
-    now = datetime.now()
     if body.reservation_date == now.strftime("%Y-%m-%d"):
         before = now + timedelta(minutes=policy.walkin_block_before_minutes)
         rows = (
@@ -244,12 +288,40 @@ def post_walkin_seat(
 
 @router.post("/walkin/leave")
 def post_walkin_leave(
-    body: FloorLockBody,
+    body: FloorWalkinLeaveBody,
     db: Session = Depends(get_db),
     user: User = Depends(require_staff),
 ):
     t = _get_table_by_code(db, body.table_code)
     _ensure_can_mutate_lock(db, t, user)
+
+    # 1) 指定散客占位记录
+    if body.occupancy_id is not None:
+        occ = db.get(TableOccupancy, body.occupancy_id)
+        if not occ or int(occ.table_id) != int(t.id) or occ.status != "seated":
+            raise HTTPException(status_code=400, detail="该桌台当前无此散客入席")
+        occ.status = "left"
+        occ.ended_at = datetime.now()
+        db.add(occ)
+        db.commit()
+        _release_table_lock(db, t.id)
+        return {"ok": True}
+
+    # 2) 指定预订（前台「散客入席」实际以 Walk-in 预订记录）
+    if body.reservation_id is not None:
+        r = db.get(Reservation, body.reservation_id)
+        if (
+            not r
+            or int(t.id) not in parse_assigned_table_ids(r)
+            or r.flow_status in ("left", "noshow", "cancelled")
+        ):
+            raise HTTPException(status_code=400, detail="该桌台当前无此散客入席")
+        r.flow_status = "left"
+        db.add(r)
+        db.commit()
+        return {"ok": True}
+
+    # 3) 兜底：该桌台最近一条散客占位记录
     occ = (
         db.query(TableOccupancy)
         .filter(
@@ -259,11 +331,32 @@ def post_walkin_leave(
         .order_by(TableOccupancy.id.desc())
         .first()
     )
-    if not occ:
-        raise HTTPException(status_code=400, detail="该桌台当前无散客入席")
-    occ.status = "left"
-    occ.ended_at = datetime.now()
-    db.add(occ)
-    db.commit()
-    _release_table_lock(db, t.id)
-    return {"ok": True}
+    if occ:
+        occ.status = "left"
+        occ.ended_at = datetime.now()
+        db.add(occ)
+        db.commit()
+        _release_table_lock(db, t.id)
+        return {"ok": True}
+
+    # 4) 兜底：该桌台最近一条「已入座」的散客预订
+    rows = (
+        db.query(Reservation)
+        .filter(
+            Reservation.reservation_date == datetime.now().strftime("%Y-%m-%d"),
+            Reservation.flow_status == "arrived",
+        )
+        .order_by(Reservation.id.desc())
+        .all()
+    )
+    for row in rows:
+        if int(t.id) not in parse_assigned_table_ids(row):
+            continue
+        if not _is_walkin_name(row.customer_name):
+            continue
+        row.flow_status = "left"
+        db.add(row)
+        db.commit()
+        return {"ok": True}
+
+    raise HTTPException(status_code=400, detail="该桌台当前无散客入席")

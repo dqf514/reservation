@@ -29,6 +29,11 @@ from ..reservation_tables_util import (
     parse_assigned_table_ids,
     set_assigned_table_ids,
 )
+from ..table_capacity_util import (
+    assert_room_capacity,
+    enabled_periods,
+    is_room_table,
+)
 from ..schemas import AdminReservationPatch, ReservationCreate, ReservationMine
 from ..sms_notify import (
     notify_reservation_cancelled,
@@ -219,6 +224,24 @@ def admin_patch_reservation(
         r.reservation_date,
         r.time_slot,
     )
+
+    # 房间型桌台：改桌 / 改人数 / 改时间后，按最终状态重新校验时段座位池。
+    if r.flow_status not in TERMINAL:
+        _periods = enabled_periods(db)
+        for tid in parse_assigned_table_ids(r):
+            rt = db.get(DiningTable, tid)
+            if not rt or not is_room_table(rt):
+                continue
+            assert_room_capacity(
+                db,
+                table=rt,
+                reservation_date=r.reservation_date,
+                time_slot=r.time_slot,
+                party_size=r.party_size,
+                periods=_periods,
+                exclude_reservation_id=r.id,
+            )
+
     db.add(r)
     db.commit()
 

@@ -2,15 +2,15 @@ import re
 from calendar import monthrange
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from ..database import get_db
 from ..deps import require_staff
 from ..floor_logic import TERMINAL
-from ..models import Customer, Deposit, Reservation, User
-from ..reservation_tables_util import parse_assigned_table_ids
+from ..models import Customer, Deposit, DiningTable, Reservation, TableOccupancy, User
+from ..reservation_tables_util import parse_assigned_table_ids, parse_table_ids_csv
 from ..operating_period_util import list_operating_periods
 from ..periods import period_key_for_periods_list
 from ..reservation_schema_compat import (
@@ -49,6 +49,84 @@ def _calendar_count_status_filter(today: str):
             Reservation.flow_status.notin_(terminal),
         ),
     )
+
+
+def _resolve_table_filter(db: Session, table_code: str | None) -> tuple[int | None, str | None]:
+    """解析日历的桌台过滤条件：返回 (table_id, table_label)；未指定时为 (None, None)。"""
+    code = (table_code or "").strip()
+    if not code:
+        return None, None
+    t = db.query(DiningTable).filter(DiningTable.code == code).first()
+    if not t:
+        raise HTTPException(status_code=400, detail=f"桌台编号不存在：{code}")
+    return int(t.id), (t.label or t.code)
+
+
+def _walkin_count_status_ok(business_date: str, status: str, today: str) -> bool:
+    """散客入席的统计口径，与预订一致。
+
+    今日及过去：已发生的到店都计入（seated / left）；
+    未来：仅计入仍在「已入席」的记录。
+    """
+    if business_date <= today:
+        return True
+    return status == "seated"
+
+
+def _collect_calendar_events(
+    db: Session,
+    *,
+    start: str,
+    end: str,
+    today: str,
+    table_id: int | None,
+) -> list[tuple[str, str, int]]:
+    """返回 [(日期, 时间槽, 人数)]，含预订与散客入席，可按桌台过滤。"""
+    events: list[tuple[str, str, int]] = []
+
+    res_rows = (
+        db.query(
+            Reservation.reservation_date,
+            Reservation.time_slot,
+            Reservation.party_size,
+            Reservation.assigned_table_id,
+            Reservation.assigned_table_ids,
+        )
+        .filter(
+            Reservation.reservation_date >= start,
+            Reservation.reservation_date <= end,
+            _calendar_count_status_filter(today),
+        )
+        .all()
+    )
+    for date_s, time_slot, party_size, at_id, at_ids in res_rows:
+        if table_id is not None:
+            if table_id not in parse_table_ids_csv(at_id, at_ids):
+                continue
+        events.append((date_s, time_slot, int(party_size or 0)))
+
+    occ_rows = (
+        db.query(
+            TableOccupancy.business_date,
+            TableOccupancy.time_slot,
+            TableOccupancy.party_size,
+            TableOccupancy.status,
+            TableOccupancy.table_id,
+        )
+        .filter(
+            TableOccupancy.business_date >= start,
+            TableOccupancy.business_date <= end,
+        )
+        .all()
+    )
+    for biz_date, time_slot, party_size, status, tid in occ_rows:
+        if table_id is not None and int(tid) != table_id:
+            continue
+        if not _walkin_count_status_ok(biz_date, status, today):
+            continue
+        events.append((biz_date, time_slot, int(party_size or 0)))
+
+    return events
 
 
 def _todo_reasons_and_highlight(r: Reservation) -> tuple[list[str], str]:
@@ -180,9 +258,11 @@ def list_todos(
 def calendar_month(
     year: int = Query(..., ge=2020, le=2100),
     month: int = Query(..., ge=1, le=12),
+    table_code: str | None = Query(None),
     db: Session = Depends(get_db),
     _: object = Depends(require_staff),
 ):
+    ensure_assigned_table_ids_column(db)
     last_d = monthrange(year, month)[1]
     start = f"{year}-{month:02d}-01"
     end = f"{year}-{month:02d}-{last_d:02d}"
@@ -191,24 +271,20 @@ def calendar_month(
     periods_rows.sort(key=lambda x: x.sort_order)
     period_label_map = {p.period_key: p.label for p in periods_rows}
     period_keys = [p.period_key for p in periods_rows]
+    table_id, table_label = _resolve_table_filter(db, table_code)
 
-    rows = (
-        db.query(
-            Reservation.reservation_date,
-            Reservation.time_slot,
-            Reservation.party_size,
-        )
-        .filter(
-            Reservation.reservation_date >= start,
-            Reservation.reservation_date <= end,
-            _calendar_count_status_filter(today),
-        )
-        .all()
+    events = _collect_calendar_events(
+        db,
+        start=start,
+        end=end,
+        today=today,
+        table_id=table_id,
     )
+
     daily: dict[str, dict] = {}
     month_total_count = 0
     month_total_party = 0
-    for date_s, time_slot, party_size in rows:
+    for date_s, time_slot, party_size in events:
         rec = daily.get(date_s)
         if rec is None:
             rec = {
@@ -278,6 +354,8 @@ def calendar_month(
         days=day_list,
         month_total_count=month_total_count,
         month_total_party=month_total_party,
+        table_code=(table_code or "").strip() or None,
+        table_label=table_label,
     )
 
 
@@ -286,16 +364,18 @@ def calendar_month(
     response_model=CalendarMonthlyTrendResponse,
 )
 def calendar_monthly_trend(
+    table_code: str | None = Query(None),
     db: Session = Depends(get_db),
     _: object = Depends(require_staff),
 ):
     """
     月度预订趋势（固定）：从系统内最早有数据月份到本地当前月。
-    不受当前日历选定月份影响。
+    不受当前日历选定月份影响；传 table_code 则只统计该桌台（含散客入席）。
     """
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
     current_ym = f"{now.year:04d}-{now.month:02d}"
+    table_id, table_label = _resolve_table_filter(db, table_code)
 
     trend_filters = (
         _calendar_count_status_filter(today),
@@ -310,33 +390,31 @@ def calendar_monthly_trend(
     )
     first_date = (str(min_date).strip() if min_date else "") or ""
     if len(first_date) < 7:
-        return CalendarMonthlyTrendResponse(items=[])
+        return CalendarMonthlyTrendResponse(
+            items=[],
+            table_code=(table_code or "").strip() or None,
+            table_label=table_label,
+        )
 
     start_y = int(first_date[:4])
     start_m = int(first_date[5:7])
 
-    # reservation_date 存 YYYY-MM-DD，取前 7 位为年月；数据库端聚合，避免拉全表
-    ym_expr = func.substr(Reservation.reservation_date, 1, 7)
-    agg_rows = (
-        db.query(
-            ym_expr.label("ym"),
-            func.count(Reservation.id),
-            func.coalesce(func.sum(Reservation.party_size), 0),
-        )
-        .filter(*trend_filters)
-        .group_by(ym_expr)
-        .order_by(ym_expr)
-        .all()
+    # 按桌台统计需读取 assigned_table_ids，改在 Python 侧过滤聚合
+    events = _collect_calendar_events(
+        db,
+        start="2020-01-01",
+        end=f"{current_ym}-31",
+        today=today,
+        table_id=table_id,
     )
     by_month: dict[str, dict[str, int]] = {}
-    for ym, cnt, party_sum in agg_rows:
-        if not ym or len(str(ym)) < 7:
+    for date_s, _time_slot, party_size in events:
+        ym = date_s[:7]
+        if len(ym) < 7:
             continue
-        ym_s = str(ym)
-        by_month[ym_s] = {
-            "count": int(cnt or 0),
-            "party": int(party_sum or 0),
-        }
+        item = by_month.setdefault(ym, {"count": 0, "party": 0})
+        item["count"] += 1
+        item["party"] += int(party_size or 0)
 
     items: list[CalendarMonthlyTrendItem] = []
     y = start_y
@@ -359,7 +437,11 @@ def calendar_monthly_trend(
             m = 1
         else:
             m += 1
-    return CalendarMonthlyTrendResponse(items=items)
+    return CalendarMonthlyTrendResponse(
+        items=items,
+        table_code=(table_code or "").strip() or None,
+        table_label=table_label,
+    )
 
 
 def _mask_phone(phone: str) -> str:
