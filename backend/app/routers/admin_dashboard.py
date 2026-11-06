@@ -13,6 +13,7 @@ from ..models import Customer, Deposit, DiningTable, Reservation, TableOccupancy
 from ..reservation_tables_util import parse_assigned_table_ids, parse_table_ids_csv
 from ..operating_period_util import list_operating_periods
 from ..periods import period_key_for_periods_list
+from ..table_capacity_util import normalize_table_type
 from ..reservation_schema_compat import (
     ensure_assigned_staff_id_column,
     ensure_assigned_staff_name_column,
@@ -127,6 +128,114 @@ def _collect_calendar_events(
         events.append((biz_date, time_slot, int(party_size or 0)))
 
     return events
+
+
+def _collect_table_totals(
+    db: Session,
+    *,
+    start: str,
+    end: str,
+    today: str,
+) -> list[dict]:
+    """各桌台在指定日期区间内的总单量 / 总人数（供日历下拉框展示）。"""
+    totals: dict[int, dict[str, int]] = {}
+
+    res_rows = (
+        db.query(
+            Reservation.assigned_table_id,
+            Reservation.assigned_table_ids,
+            Reservation.party_size,
+        )
+        .filter(
+            Reservation.reservation_date >= start,
+            Reservation.reservation_date <= end,
+            _calendar_count_status_filter(today),
+        )
+        .all()
+    )
+    for at_id, at_ids, party_size in res_rows:
+        for tid in parse_table_ids_csv(at_id, at_ids):
+            agg = totals.setdefault(tid, {"count": 0, "party": 0})
+            agg["count"] += 1
+            agg["party"] += int(party_size or 0)
+
+    occ_rows = (
+        db.query(
+            TableOccupancy.business_date,
+            TableOccupancy.time_slot,
+            TableOccupancy.party_size,
+            TableOccupancy.status,
+            TableOccupancy.table_id,
+        )
+        .filter(
+            TableOccupancy.business_date >= start,
+            TableOccupancy.business_date <= end,
+        )
+        .all()
+    )
+    for biz_date, _time_slot, party_size, status, tid in occ_rows:
+        if not _walkin_count_status_ok(biz_date, status, today):
+            continue
+        agg = totals.setdefault(int(tid), {"count": 0, "party": 0})
+        agg["count"] += 1
+        agg["party"] += int(party_size or 0)
+
+    out: list[dict] = []
+    for t in db.query(DiningTable).order_by(DiningTable.sort_order, DiningTable.id).all():
+        agg = totals.get(int(t.id), {"count": 0, "party": 0})
+        out.append(
+            {
+                "table_code": t.code,
+                "table_label": t.label,
+                "table_type": normalize_table_type(getattr(t, "table_type", None)),
+                "count": int(agg["count"]),
+                "party": int(agg["party"]),
+            }
+        )
+    return out
+
+
+def _calendar_totals(
+    db: Session,
+    *,
+    start: str,
+    end: str,
+    today: str,
+) -> tuple[int, int]:
+    """指定区间内的全店总量：(单量, 人数)。不受桌台过滤影响。"""
+    res_count, res_party = (
+        db.query(
+            func.count(Reservation.id),
+            func.coalesce(func.sum(Reservation.party_size), 0),
+        )
+        .filter(
+            Reservation.reservation_date >= start,
+            Reservation.reservation_date <= end,
+            _calendar_count_status_filter(today),
+        )
+        .first()
+        or (0, 0)
+    )
+    occ_count, occ_party = (
+        db.query(
+            func.count(TableOccupancy.id),
+            func.coalesce(func.sum(TableOccupancy.party_size), 0),
+        )
+        .filter(
+            TableOccupancy.business_date >= start,
+            TableOccupancy.business_date <= end,
+            or_(
+                TableOccupancy.business_date <= today,
+                and_(
+                    TableOccupancy.business_date > today,
+                    TableOccupancy.status == "seated",
+                ),
+            ),
+        )
+        .first()
+        or (0, 0)
+    )
+    return int(res_count or 0) + int(occ_count or 0), int(res_party or 0) + int(occ_party or 0)
 
 
 def _todo_reasons_and_highlight(r: Reservation) -> tuple[list[str], str]:
@@ -348,6 +457,9 @@ def calendar_month(
                 by_period=by_period_rows,
             )
         )
+    all_count, all_party = _calendar_totals(
+        db, start=start, end=end, today=today
+    )
     return CalendarMonthResponse(
         year=year,
         month=month,
@@ -356,6 +468,11 @@ def calendar_month(
         month_total_party=month_total_party,
         table_code=(table_code or "").strip() or None,
         table_label=table_label,
+        all_month_total_count=all_count,
+        all_month_total_party=all_party,
+        table_totals=_collect_table_totals(
+            db, start=start, end=end, today=today
+        ),
     )
 
 

@@ -449,6 +449,16 @@ class CalendarDayCount(BaseModel):
     by_period: list[CalendarPeriodCount] = Field(default_factory=list)
 
 
+class CalendarTableTotal(BaseModel):
+    """日历下拉用：某桌台在当前查看月份内的总量。"""
+
+    table_code: str
+    table_label: str
+    table_type: str = "standard"
+    count: int = 0
+    party: int = 0
+
+
 class CalendarMonthResponse(BaseModel):
     year: int
     month: int
@@ -458,6 +468,11 @@ class CalendarMonthResponse(BaseModel):
     # 按桌台统计时的过滤条件（None=全店）
     table_code: str | None = None
     table_label: str | None = None
+    # 不受桌台过滤影响的全店本月总量（供下拉框「全部」项展示）
+    all_month_total_count: int = 0
+    all_month_total_party: int = 0
+    # 各桌台本月总量（供下拉框展示总人数）
+    table_totals: list[CalendarTableTotal] = Field(default_factory=list)
 
 
 class CalendarMonthlyTrendItem(BaseModel):

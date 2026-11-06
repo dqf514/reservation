@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
+import { TableScopeSelect, type TableScopeOption } from "@/components/admin/TableScopeSelect";
 import type {
   CalendarMonthResponse,
   CalendarMonthlyTrendResponse,
@@ -264,6 +265,35 @@ export function AdminCalendarPage() {
     return t ? t.label : tableCode;
   }, [tableCode, tableOptions]);
 
+  /** 下拉选项：桌台列表 + 本月各桌台总人数（淡色显示） */
+  const scopeOptions = useMemo<TableScopeOption[]>(() => {
+    const totals = new Map(
+      (data?.table_totals ?? []).map((t) => [t.table_code, t]),
+    );
+    const seen = new Set<string>();
+    const out: TableScopeOption[] = [];
+    for (const t of tableOptions) {
+      const agg = totals.get(t.code);
+      out.push({
+        value: t.code,
+        label: t.label,
+        badge: t.table_type === "room" ? "房间" : undefined,
+        total: agg?.party ?? 0,
+      });
+      seen.add(t.code);
+    }
+    for (const agg of data?.table_totals ?? []) {
+      if (seen.has(agg.table_code)) continue;
+      out.push({
+        value: agg.table_code,
+        label: agg.table_label,
+        badge: agg.table_type === "room" ? "房间" : undefined,
+        total: agg.party,
+      });
+    }
+    return out;
+  }, [tableOptions, data?.table_totals]);
+
   /** 以当前查看月为基准，前后各 6 个月（共 13 个）供下拉跳转 */
   const monthSelectOptions = useMemo(() => {
     const out: { y: number; m: number; value: string; label: string }[] = [];
@@ -492,33 +522,15 @@ export function AdminCalendarPage() {
           >
             →
           </button>
-          <div className="relative min-w-[9rem]">
-            <label htmlFor="calendar-table-select" className="sr-only">
-              统计范围（按桌台）
-            </label>
-            <select
-              id="calendar-table-select"
-              value={tableCode}
-              title="统计范围：选择桌台后只统计该桌台（含房间型桌台的散客入席）"
-              aria-label="统计范围"
-              onChange={(e) => setTableCode(e.target.value)}
-              className="w-full cursor-pointer appearance-none rounded-lg border border-stone-200 bg-white py-1.5 pl-3 pr-9 text-sm font-medium text-stone-800 hover:border-stone-300 focus:border-brand-coral focus:outline-none focus:ring-2 focus:ring-brand-coral/25"
-            >
-              <option value="">全店</option>
-              {tableOptions.map((t) => (
-                <option key={t.code} value={t.code}>
-                  {t.label}
-                  {t.table_type === "room" ? "（房间）" : ""}
-                </option>
-              ))}
-            </select>
-            <span
-              className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-stone-400"
-              aria-hidden
-            >
-              ▾
-            </span>
-          </div>
+          <TableScopeSelect
+            value={tableCode}
+            options={scopeOptions}
+            onChange={setTableCode}
+            allLabel="全店"
+            allTotal={data?.all_month_total_party}
+            title="统计范围：选择桌台后只统计该桌台（含房间型桌台的散客入席）"
+            className="min-w-[11rem]"
+          />
         </div>
       </div>
 

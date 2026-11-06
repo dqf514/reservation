@@ -98,6 +98,14 @@ export type CalendarDayCount = {
   by_period: CalendarPeriodCount[];
 };
 
+export type CalendarTableTotal = {
+  table_code: string;
+  table_label: string;
+  table_type: TableType;
+  count: number;
+  party: number;
+};
+
 export type CalendarMonthResponse = {
   year: number;
   month: number;
@@ -107,6 +115,11 @@ export type CalendarMonthResponse = {
   /** 按桌台统计时的过滤条件（undefined/null = 全店） */
   table_code?: string | null;
   table_label?: string | null;
+  /** 不受桌台过滤影响的全店本月总量 */
+  all_month_total_count?: number;
+  all_month_total_party?: number;
+  /** 各桌台本月总量（供下拉框展示总人数） */
+  table_totals?: CalendarTableTotal[];
 };
 
 export type CalendarMonthlyTrendItem = {
