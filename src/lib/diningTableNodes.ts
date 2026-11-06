@@ -21,5 +21,6 @@ export function diningTableItemsToNodes(items: DiningTableItem[]): TableNode[] {
     capacity: t.capacity,
     ratio: t.is_active ? `0/${t.capacity}` : undefined,
     status: t.is_active ? "empty" : "unavailable",
+    tableType: t.table_type === "room" ? "room" : "standard",
   }));
 }

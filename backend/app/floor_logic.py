@@ -120,31 +120,40 @@ def _build_room_node(
         reservations=day_rows,
         occupancies=occ_rows,
     )
-    if usage.occupancy_count > 0:
-        status = "arrived"
-    elif usage.reservation_count > 0:
-        status = "reserved"
-    elif usage.capacity > 0 and usage.used_seats >= usage.capacity:
-        status = "unavailable"
-    else:
-        status = "empty"
 
     times: list[str] = []
+    has_occupancy = False
+    has_reservation = False
     for r in day_rows:
         if r.flow_status in TERMINAL:
             continue
         if int(dt.id) not in parse_assigned_table_ids(r):
             continue
+        has_reservation = True
         if not time_in_period_with_periods(periods, r.time_slot, period):
             continue
         times.append(r.time_slot)
     for occ in occ_rows:
         if int(occ.table_id) != int(dt.id):
             continue
+        has_occupancy = True
         if not time_in_period_with_periods(periods, occ.time_slot, period):
             continue
         times.append(occ.time_slot)
     times.sort()
+
+    # 状态按「当天是否有散客入座 / 有效预订」判定（不受时段筛选影响）
+    if has_occupancy:
+        status = "arrived"
+    elif has_reservation:
+        status = "reserved"
+    elif usage.capacity > 0 and usage.used_seats >= usage.capacity:
+        status = "unavailable"
+    else:
+        status = "empty"
+
+    is_all = (period or "").strip().lower() == "all"
+    party_total = usage.day_parties if is_all else usage.party_count
 
     return {
         "id": dt.code,
@@ -158,7 +167,7 @@ def _build_room_node(
         "status": status,
         "time": times[0] if times else None,
         "ratio": f"{usage.used_seats}/{usage.capacity}",
-        "guestHint": f"{usage.party_count} 桌" if usage.party_count else None,
+        "guestHint": f"{party_total} 桌" if party_total else None,
         "isLocked": bool(lock),
         "lockedBy": lock.locked_by_username if lock else None,
         "tableType": "room",

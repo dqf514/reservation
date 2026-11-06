@@ -1,3 +1,6 @@
+/** 桌台类型：standard=普通桌（一桌一单）；room=房间/包厢（同时段共享座位池） */
+export type TableType = "standard" | "room";
+
 /** 餐位主数据（与 /api/admin/dining-tables 一致） */
 export type DiningTableItem = {
   id: number;
@@ -10,6 +13,7 @@ export type DiningTableItem = {
   sort_order: number;
   capacity: number;
   is_active: boolean;
+  table_type: TableType;
 };
 
 export type DashboardSummary = {
@@ -100,6 +104,9 @@ export type CalendarMonthResponse = {
   days: CalendarDayCount[];
   month_total_count: number;
   month_total_party: number;
+  /** 按桌台统计时的过滤条件（undefined/null = 全店） */
+  table_code?: string | null;
+  table_label?: string | null;
 };
 
 export type CalendarMonthlyTrendItem = {
@@ -111,6 +118,8 @@ export type CalendarMonthlyTrendItem = {
 
 export type CalendarMonthlyTrendResponse = {
   items: CalendarMonthlyTrendItem[];
+  table_code?: string | null;
+  table_label?: string | null;
 };
 
 export type CustomerListResponse = {

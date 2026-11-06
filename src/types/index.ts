@@ -6,6 +6,36 @@ export type TableStatus =
   | "final_confirm"
   | "arrived";
 
+/** 房间型桌台在同一时段的座位占用（预订 + 散客合并） */
+export interface RoomUsage {
+  capacity: number;
+  reserved: number;
+  seated: number;
+  used: number;
+  free: number;
+  reservations: number;
+  occupancies: number;
+  parties: number;
+  /** 全天合计（各时段相加） */
+  day_used: number;
+  day_parties: number;
+  /** 时段峰值 */
+  peak_used: number;
+  peak_period: string;
+  /** 当前统计口径对应的时段（"all" 时取峰值时段） */
+  scope_period: string;
+  by_period: Array<{
+    period_key: string;
+    label: string;
+    reserved: number;
+    seated: number;
+    used: number;
+    parties: number;
+    reservations: number;
+    occupancies: number;
+  }>;
+}
+
 export interface TableNode {
   id: string;
   /** 数据库餐位主键，管理端拖拽保存坐标用 */
@@ -23,6 +53,10 @@ export interface TableNode {
   guestHint?: string;
   isLocked?: boolean;
   lockedBy?: string | null;
+  /** standard=普通桌（一桌一单）；room=房间/包厢（同时段共享座位池） */
+  tableType?: "standard" | "room";
+  /** 房间型桌台的聚合占用情况 */
+  roomUsage?: RoomUsage;
 }
 
 export type GuestFlowStatus =

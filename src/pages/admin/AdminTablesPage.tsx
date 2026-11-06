@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { FloorCanvas } from "@/components/admin/FloorCanvas";
 import { apiFetch } from "@/lib/api";
 import { diningTableItemsToNodes } from "@/lib/diningTableNodes";
-import type { DiningTableItem } from "@/types/admin";
+import type { DiningTableItem, TableType } from "@/types/admin";
 
 const emptyForm = {
   code: "",
@@ -14,6 +14,7 @@ const emptyForm = {
   sort_order: 0,
   capacity: 4,
   is_active: true,
+  table_type: "standard" as TableType,
 };
 
 export function AdminTablesPage() {
@@ -35,6 +36,10 @@ export function AdminTablesPage() {
     const raw = (label || "").trim();
     if (!raw) return "";
     return raw.slice(0, 4);
+  }
+
+  function typeLabel(t: DiningTableItem): string {
+    return t.table_type === "room" ? "房间" : "普通";
   }
 
   const [list, setList] = useState<DiningTableItem[]>([]);
@@ -105,8 +110,28 @@ export function AdminTablesPage() {
       sort_order: t.sort_order,
       capacity: t.capacity,
       is_active: t.is_active,
+      table_type: t.table_type === "room" ? "room" : "standard",
     });
     setModalOpen(true);
+  }
+
+  /** 列表里快速切换「普通桌 / 房间」 */
+  async function toggleTableType(t: DiningTableItem) {
+    const next: TableType = t.table_type === "room" ? "standard" : "room";
+    const tip =
+      next === "room"
+        ? `将「${t.label}」设为房间？\n房间可同时接待多组客人（按 ${t.capacity} 个座位合并计算），普通桌仍是「一桌一单」。`
+        : `将「${t.label}」改回普通桌？\n改回后该桌同时段只能安排一组客人。`;
+    if (!window.confirm(tip)) return;
+    try {
+      await apiFetch(`/api/admin/dining-tables/${t.id}`, {
+        method: "PATCH",
+        json: { table_type: next },
+      });
+      await load();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "切换失败");
+    }
   }
 
   function onCanvasSelect(code: string) {
@@ -138,6 +163,7 @@ export function AdminTablesPage() {
             sort_order: form.sort_order,
             capacity: form.capacity,
             is_active: form.is_active,
+            table_type: form.table_type,
           },
         });
       } else {
@@ -153,6 +179,7 @@ export function AdminTablesPage() {
             sort_order: form.sort_order,
             capacity: form.capacity,
             is_active: form.is_active,
+            table_type: form.table_type,
           },
         });
       }
@@ -225,6 +252,7 @@ export function AdminTablesPage() {
                 <tr>
                   <th className="px-2 py-1.5">名称</th>
                   <th className="px-1.5 py-1.5">容量</th>
+                  <th className="px-1.5 py-1.5">类型</th>
                   <th className="px-1.5 py-1.5">形状</th>
                   <th className="px-1.5 py-1.5">状态</th>
                   <th className="px-1.5 py-1.5">操作</th>
@@ -239,7 +267,27 @@ export function AdminTablesPage() {
                     <td className="px-2 py-1.5 font-medium" title={t.label}>
                       {shortName(t.label)}
                     </td>
-                    <td className="px-1.5 py-1.5">{t.capacity}人</td>
+                    <td className="px-1.5 py-1.5">
+                      {t.table_type === "room" ? `${t.capacity}座` : `${t.capacity}人`}
+                    </td>
+                    <td className="px-1.5 py-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void toggleTableType(t)}
+                        title={
+                          t.table_type === "room"
+                            ? "点击改为普通桌（同时段只能安排一组客人）"
+                            : "点击设为房间（同时段可接待多组客人，按座位数合并计算）"
+                        }
+                        className={`rounded-full border px-1.5 py-0.5 text-[11px] font-medium ${
+                          t.table_type === "room"
+                            ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                            : "border-stone-200 bg-stone-50 text-stone-600"
+                        }`}
+                      >
+                        {typeLabel(t)}
+                      </button>
+                    </td>
                     <td className="px-1.5 py-1.5">{shapeLabel(t.shape)}</td>
                     <td className="px-1.5 py-1.5">{t.is_active ? "启用" : "停用"}</td>
                     <td className="px-1.5 py-1.5 whitespace-nowrap">
@@ -318,7 +366,9 @@ export function AdminTablesPage() {
               </label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
-                  <span className="text-xs text-stone-500">容纳人数</span>
+                  <span className="text-xs text-stone-500">
+                    {form.table_type === "room" ? "座位数" : "容纳人数"}
+                  </span>
                   <input
                     type="number"
                     min={1}
@@ -340,6 +390,24 @@ export function AdminTablesPage() {
                   />
                 </label>
               </div>
+              <label className="block">
+                <span className="text-xs text-stone-500">桌台类型</span>
+                <select
+                  value={form.table_type}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, table_type: e.target.value as TableType }))
+                  }
+                  className="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2"
+                >
+                  <option value="standard">普通桌（同时段一桌一单）</option>
+                  <option value="room">房间 / 包厢（同时段可接待多组客人）</option>
+                </select>
+                <span className="mt-1 block text-[11px] leading-4 text-stone-500">
+                  {form.table_type === "room"
+                    ? "房间按「时段」计算座位池：同一时段内所有预订与散客人数合并累加，超过座位数将被拒绝。"
+                    : "普通桌同时段只能安排一组客人，一旦入席/预订即占用该桌。"}
+                </span>
+              </label>
               <label className="block">
                 <span className="text-xs text-stone-500">桌面形状</span>
                 <select

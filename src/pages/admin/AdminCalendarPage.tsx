@@ -4,6 +4,7 @@ import { apiFetch } from "@/lib/api";
 import type {
   CalendarMonthResponse,
   CalendarMonthlyTrendResponse,
+  DiningTableItem,
 } from "@/types/admin";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
@@ -225,12 +226,43 @@ export function AdminCalendarPage() {
   const [monthlyTrend, setMonthlyTrend] = useState<
     CalendarMonthlyTrendResponse["items"]
   >([]);
+  /** 统计口径：空字符串 = 全店；否则只统计该桌台（房间等） */
+  const [tableCode, setTableCode] = useState<string>("");
+  const [tableOptions, setTableOptions] = useState<DiningTableItem[]>([]);
   /** 当前月份网格优先：首屏为 true，避免与趋势请求争抢 */
   const [loading, setLoading] = useState(true);
   const [trendLoading, setTrendLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   /** 月度趋势是否已拉取结束（成功或失败）；未完成前可因切换月份重试 */
   const trendDoneRef = useRef(false);
+
+  /** 桌台列表：用于「按桌台统计」下拉 */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await apiFetch<DiningTableItem[]>("/api/admin/dining-tables");
+        if (!cancelled) setTableOptions(Array.isArray(raw) ? raw : []);
+      } catch {
+        if (!cancelled) setTableOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** 统计口径变化时，趋势需重新拉取 */
+  useEffect(() => {
+    trendDoneRef.current = false;
+    setMonthlyTrend([]);
+  }, [tableCode]);
+
+  const tableScopeLabel = useMemo(() => {
+    if (!tableCode) return "全店";
+    const t = tableOptions.find((x) => x.code === tableCode);
+    return t ? t.label : tableCode;
+  }, [tableCode, tableOptions]);
 
   /** 以当前查看月为基准，前后各 6 个月（共 13 个）供下拉跳转 */
   const monthSelectOptions = useMemo(() => {
@@ -257,6 +289,7 @@ export function AdminCalendarPage() {
     (async () => {
       try {
         const q = new URLSearchParams({ year: String(y), month: String(m) });
+        if (tableCode) q.set("table_code", tableCode);
         const r = await apiFetch<CalendarMonthResponse>(`/api/admin/calendar/month?${q}`);
         if (cancelled) return;
         setData(r);
@@ -271,7 +304,7 @@ export function AdminCalendarPage() {
     return () => {
       cancelled = true;
     };
-  }, [year, month]);
+  }, [year, month, tableCode]);
 
   /** 当前月数据返回后再延后加载月度趋势（idle 或超时），避免首屏被重查询阻塞 */
   useEffect(() => {
@@ -286,8 +319,11 @@ export function AdminCalendarPage() {
       setTrendLoading(true);
       (async () => {
         try {
+          const tq = new URLSearchParams();
+          if (tableCode) tq.set("table_code", tableCode);
+          const qs = tq.toString();
           const r = await apiFetch<CalendarMonthlyTrendResponse>(
-            "/api/admin/calendar/monthly-trend",
+            `/api/admin/calendar/monthly-trend${qs ? `?${qs}` : ""}`,
           );
           if (!cancelled) setMonthlyTrend(r.items || []);
         } catch {
@@ -321,7 +357,7 @@ export function AdminCalendarPage() {
       }
       if (fallbackId !== undefined) window.clearTimeout(fallbackId);
     };
-  }, [loading]);
+  }, [loading, tableCode]);
 
   const monthLen = useMemo(() => new Date(year, month, 0).getDate(), [year, month]);
 
@@ -456,6 +492,33 @@ export function AdminCalendarPage() {
           >
             →
           </button>
+          <div className="relative min-w-[9rem]">
+            <label htmlFor="calendar-table-select" className="sr-only">
+              统计范围（按桌台）
+            </label>
+            <select
+              id="calendar-table-select"
+              value={tableCode}
+              title="统计范围：选择桌台后只统计该桌台（含房间型桌台的散客入席）"
+              aria-label="统计范围"
+              onChange={(e) => setTableCode(e.target.value)}
+              className="w-full cursor-pointer appearance-none rounded-lg border border-stone-200 bg-white py-1.5 pl-3 pr-9 text-sm font-medium text-stone-800 hover:border-stone-300 focus:border-brand-coral focus:outline-none focus:ring-2 focus:ring-brand-coral/25"
+            >
+              <option value="">全店</option>
+              {tableOptions.map((t) => (
+                <option key={t.code} value={t.code}>
+                  {t.label}
+                  {t.table_type === "room" ? "（房间）" : ""}
+                </option>
+              ))}
+            </select>
+            <span
+              className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-stone-400"
+              aria-hidden
+            >
+              ▾
+            </span>
+          </div>
         </div>
       </div>
 
@@ -464,7 +527,12 @@ export function AdminCalendarPage() {
       <div className="mt-4 grid min-h-0 flex-1 items-stretch gap-4 xl:grid-cols-[1.05fr_1.45fr]">
         <section className="flex min-h-0 h-full flex-col gap-4">
           <div className="rounded-2xl border border-stone-200 bg-white p-3">
-            <p className="text-xs text-stone-500">本月累计</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-stone-500">本月累计</p>
+              <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
+                统计范围：{tableScopeLabel}
+              </span>
+            </div>
             <div className="mt-3 grid grid-cols-2 gap-2">
               <div className="rounded-xl bg-stone-100 p-3">
                 <p className="text-xs text-stone-500">预订单量</p>
@@ -626,10 +694,12 @@ export function AdminCalendarPage() {
                     const solarTerm = getSolarTermLabel(dayDate);
                     const holiday = getHolidayLabel(dayDate, lunarLabel);
                     const isToday = c.dateStr === todayStr;
-                    const toReservations = `/admin/reservations?${new URLSearchParams({
+                    const resParams = new URLSearchParams({
                       date_from: c.dateStr,
                       date_to: c.dateStr,
-                    }).toString()}`;
+                    });
+                    if (tableCode) resParams.set("table_code", tableCode);
+                    const toReservations = `/admin/reservations?${resParams.toString()}`;
                     return (
                   <Link
                     to={toReservations}

@@ -338,6 +338,11 @@ export function AdminFloorPage() {
   const [createSaving, setCreateSaving] = useState(false);
   const [createForm, setCreateForm] = useState<CreateReservationForm>(emptyCreateForm);
   const [editingReservationId, setEditingReservationId] = useState<number | null>(null);
+  /** 编辑前的原始分配（用于房间座位提示：把本单已占的座位扣回） */
+  const [editingReservationMeta, setEditingReservationMeta] = useState<{
+    tableCodes: string[];
+    partySize: number;
+  } | null>(null);
   const [profileBusy, setProfileBusy] = useState(false);
   const [phoneProfile, setPhoneProfile] = useState<CustomerProfileResponse | null>(null);
   const [smsBusyGuestId, setSmsBusyGuestId] = useState<string | null>(null);
@@ -506,6 +511,58 @@ export function AdminFloorPage() {
     return guests.find((g) => g.id === selectedReservationId) ?? null;
   }, [selectedReservationId, guests]);
 
+  /** 房间型桌台同时段可能有多组客人，需列出全部以便逐组操作 */
+  const selectedParties = useMemo(() => {
+    if (!selectedTable) return [] as GuestCard[];
+    return guests.filter(
+      (x) => x.table === selectedTable.id && !TERMINAL_FLOWS.has(x.flow),
+    );
+  }, [selectedTable, guests]);
+
+  const selectedRoomUsage = selectedTable?.tableType === "room" ? selectedTable.roomUsage : undefined;
+
+  /** 新建/编辑预订时，房间剩余座位提示 */
+  const roomSeatHint = useMemo(() => {
+    const codes = createForm.assigned_table_codes;
+    if (!codes.length) return null;
+    const room = tables.find(
+      (t) => t.tableType === "room" && codes.includes(t.id),
+    );
+    if (!room?.roomUsage) return null;
+    // 「全部时段」视图下 roomUsage 取的是峰值时段，需按本单时间换算准确口径
+    const scoped =
+      period === "all"
+        ? (room.roomUsage.by_period ?? []).find(
+            (p) => p.period_key === timeSlotToPeriod(createForm.time_slot, op),
+          )
+        : undefined;
+    const usedScoped = scoped ? scoped.used : room.roomUsage.used;
+    // 编辑时：房间已用座位里包含本单，需要先扣回再比较
+    const selfOnRoom =
+      editingReservationMeta &&
+      editingReservationMeta.tableCodes.includes(room.id)
+        ? editingReservationMeta.partySize
+        : 0;
+    const usedByOthers = Math.max(0, usedScoped - selfOnRoom);
+    const free = Math.max(0, room.roomUsage.capacity - usedByOthers);
+    return {
+      label: room.label,
+      capacity: room.roomUsage.capacity,
+      used: usedScoped,
+      free,
+      party: createForm.party_size,
+      over: createForm.party_size > free,
+    };
+  }, [
+    createForm.assigned_table_codes,
+    createForm.party_size,
+    createForm.time_slot,
+    tables,
+    editingReservationMeta,
+    period,
+    op,
+  ]);
+
   const selectedFlow = selectedGuest?.flow ?? null;
 
   const openEditReservationModal = useCallback(
@@ -542,6 +599,10 @@ export function AdminFloorPage() {
         const staffLabel =
           (r.assigned_staff_name || "").trim() ||
           (user?.full_name || user?.username || "").trim();
+        const loadedTableCodes =
+          (r.table_codes && r.table_codes.length > 0)
+            ? r.table_codes
+            : (r.table_code ? [r.table_code] : []);
         setCreateForm({
           ...emptyCreateForm,
           customer_name: r.customer_name || "",
@@ -553,11 +614,13 @@ export function AdminFloorPage() {
           flow_status: prefill?.forceArrived ? "arrived" : (r.flow_status || "confirmed"),
           tags: r.tags || "",
           walkin_quick: (r.customer_name || "").trim().toLowerCase() === "walk-in" || (r.customer_name || "").trim().toLowerCase() === "walkin",
-          assigned_table_codes: (r.table_codes && r.table_codes.length > 0)
-            ? r.table_codes
-            : (r.table_code ? [r.table_code] : []),
+          assigned_table_codes: loadedTableCodes,
           send_sms: false,
           assigned_staff_name: staffLabel,
+        });
+        setEditingReservationMeta({
+          tableCodes: loadedTableCodes,
+          partySize: Number(r.party_size) || 0,
         });
         setEditingReservationId(Number(reservationId));
         setCreateOpen(true);
@@ -603,6 +666,7 @@ export function AdminFloorPage() {
         assigned_staff_name: (user?.full_name || user?.username || "").trim(),
       });
       setEditingReservationId(null);
+      setEditingReservationMeta(null);
       setCreateOpen(true);
     },
     [dateStr, period, defaultPeriod, op, nowHm, shouldDefaultWalkinToLeft, user?.full_name, user?.username],
@@ -610,15 +674,16 @@ export function AdminFloorPage() {
 
   const quickBusyRef = useRef(false);
   const quickSetFlow = useCallback(
-    async (flow: GuestFlowStatus) => {
-      if (!selectedReservationId) return;
+    async (flow: GuestFlowStatus, reservationId?: string | null) => {
+      const targetId = reservationId ?? selectedReservationId;
+      if (!targetId) return;
       if (quickBusyRef.current) return;
       quickBusyRef.current = true;
       try {
         const ret = await apiFetch<{
           ok?: boolean;
           cancel_sms?: { sent?: boolean; reason?: string; error?: string; wait_seconds?: number };
-        }>(`/api/admin/reservations/${selectedReservationId}`, {
+        }>(`/api/admin/reservations/${targetId}`, {
           method: "PATCH",
           json: { flow_status: flow },
         });
@@ -741,10 +806,15 @@ export function AdminFloorPage() {
     setRev((x) => x + 1);
   }
 
-  async function leaveWalkin(tableCode: string) {
+  async function leaveWalkin(tableCode: string, reservationId?: string | null) {
     await apiFetch("/api/admin/floor/walkin/leave", {
       method: "POST",
-      json: { table_code: tableCode },
+      json: {
+        table_code: tableCode,
+        ...(reservationId && /^\d+$/.test(reservationId)
+          ? { reservation_id: Number(reservationId) }
+          : {}),
+      },
     });
     setRev((x) => x + 1);
   }
@@ -869,6 +939,7 @@ export function AdminFloorPage() {
         });
       }
       setEditingReservationId(null);
+      setEditingReservationMeta(null);
       setCreateOpen(false);
       setRev((x) => x + 1);
     } catch (e) {
@@ -1349,16 +1420,44 @@ export function AdminFloorPage() {
                   <div className="mt-1 rounded-xl border border-stone-200 p-2">
                     <div className="flex flex-wrap">
                       {tables.map((t) => (
-                        <label key={t.id} className="mb-1 mr-2 inline-flex items-center text-xs text-stone-700">
+                        <label
+                          key={t.id}
+                          className="mb-1 mr-2 inline-flex items-center text-xs text-stone-700"
+                          title={
+                            t.tableType === "room" && t.roomUsage
+                              ? `房间：已占用 ${t.roomUsage.used}/${t.roomUsage.capacity} 座（预订 ${t.roomUsage.reserved} · 散客 ${t.roomUsage.seated}）· ${t.roomUsage.parties} 组`
+                              : undefined
+                          }
+                        >
                           <input
                             type="checkbox"
                             checked={createForm.assigned_table_codes.includes(t.id)}
                             onChange={() => toggleCreateTable(t.id)}
                           />
                           <span>{t.label}</span>
+                          {t.tableType === "room" && t.roomUsage && (
+                            <span className="ml-1 rounded-full bg-indigo-50 px-1 text-[10px] font-medium text-indigo-700">
+                              房 {t.roomUsage.used}/{t.roomUsage.capacity}
+                            </span>
+                          )}
                         </label>
                       ))}
                     </div>
+                    {roomSeatHint && (
+                      <p
+                        className={`mt-2 rounded-lg px-2 py-1 text-[11px] leading-4 ${
+                          roomSeatHint.over
+                            ? "bg-red-50 text-red-700"
+                            : "bg-indigo-50 text-indigo-700"
+                        }`}
+                      >
+                        {roomSeatHint.label}（房间）：该时段已占用 {roomSeatHint.used}/
+                        {roomSeatHint.capacity} 座，本单 {roomSeatHint.party} 人，
+                        {roomSeatHint.over
+                          ? `超出剩余 ${roomSeatHint.free} 座，保存时会被拒绝。`
+                          : `剩余可安排 ${roomSeatHint.free} 座。`}
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="rounded-xl border border-stone-200 bg-stone-50 p-3">
@@ -1479,8 +1578,41 @@ export function AdminFloorPage() {
                 <p className="font-semibold">
                   {selectedTable.label}
                   <span className="ml-2 font-normal text-stone-500">{STATUS_LABEL[selectedTable.status]}</span>
+                  {selectedTable.tableType === "room" && (
+                    <span className="ml-2 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                      房间
+                    </span>
+                  )}
                 </p>
                 {selectedTable.guestHint && <p className="mt-1 text-sm text-stone-600">客人：{selectedTable.guestHint}</p>}
+                {selectedRoomUsage && (
+                  <div className="mt-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
+                    <p>
+                      座位占用 <span className="font-semibold">{selectedRoomUsage.used}/{selectedRoomUsage.capacity}</span>
+                      <span className="ml-2 text-indigo-700">
+                        预订 {selectedRoomUsage.reserved} · 散客 {selectedRoomUsage.seated} · 共 {selectedRoomUsage.parties} 组
+                      </span>
+                    </p>
+                    <p className="mt-1 text-indigo-700">
+                      剩余 {selectedRoomUsage.free} 座
+                      {selectedRoomUsage.day_used &&
+                      selectedRoomUsage.day_used !== selectedRoomUsage.used && (
+                        <span className="ml-2">· 全天合计 {selectedRoomUsage.day_used} 人</span>
+                      )}
+                    </p>
+                    {(selectedRoomUsage.by_period ?? []).some((p) => p.used > 0) && (
+                      <ul className="mt-1 space-y-0.5 text-indigo-700">
+                        {(selectedRoomUsage.by_period ?? [])
+                          .filter((p) => p.used > 0)
+                          .map((p) => (
+                            <li key={p.period_key}>
+                              {p.label}：{p.used}/{selectedRoomUsage.capacity} 座（{p.parties} 组）
+                            </li>
+                          ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
                 {selectedGuest?.note && <p className="mt-1 text-xs text-stone-600">备注：{selectedGuest.note}</p>}
                 {selectedTable.isLocked && (
                   <p className="mt-1 text-xs text-amber-700">已锁定（{selectedTable.lockedBy || "未知"}）</p>
@@ -1490,6 +1622,55 @@ export function AdminFloorPage() {
                 关闭
               </button>
             </div>
+            {selectedTable.tableType === "room" && selectedParties.length > 0 && (
+              <div className="mt-3 rounded-xl border border-stone-200">
+                <p className="border-b border-stone-200 px-3 py-2 text-xs font-medium text-stone-700">
+                  本桌客人（{selectedParties.length} 组）
+                </p>
+                <ul className="max-h-56 divide-y divide-stone-100 overflow-y-auto">
+                  {selectedParties.map((g) => (
+                    <li key={g.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm text-stone-800">
+                          {g.name}
+                          <span className="ml-2 text-xs text-stone-500">
+                            {g.time} · {g.party} 位
+                          </span>
+                        </p>
+                        {g.note && <p className="truncate text-[11px] text-stone-500">备注：{g.note}</p>}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {g.flow === "arrived" && (
+                          <button
+                            type="button"
+                            onClick={() => void leaveWalkin(selectedTable.id, g.id)}
+                            className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                          >
+                            离席
+                          </button>
+                        )}
+                        {g.flow === "waiting" && (
+                          <button
+                            type="button"
+                            onClick={() => void quickSetFlow("confirmed", g.id)}
+                            className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                          >
+                            确认
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => void goEditReservation(g.id)}
+                          className="rounded-lg border border-stone-200 px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                        >
+                          编辑
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {selectedReservationId ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 <button type="button" onClick={() => goEditReservation(selectedReservationId)} className="rounded-xl bg-brand-coral px-4 py-2 text-sm font-medium text-white">编辑预订</button>
@@ -1505,7 +1686,11 @@ export function AdminFloorPage() {
               </div>
             ) : (
               <div className="mt-3 flex flex-wrap gap-2">
-                {selectedTable.status === "arrived" ? (
+                {selectedTable.tableType === "room" ? (
+                  <button type="button" onClick={() => openCreateReservation(selectedTable.id, true)} className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700">
+                    散客入席（房间）
+                  </button>
+                ) : selectedTable.status === "arrived" ? (
                   <button type="button" onClick={() => void leaveWalkin(selectedTable.id)} className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700">散客离席</button>
                 ) : (
                   <button type="button" onClick={() => openCreateReservation(selectedTable.id, true)} className="rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700">散客入席</button>

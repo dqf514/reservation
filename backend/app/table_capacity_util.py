@@ -54,6 +54,14 @@ class RoomUsage:
     used_seats: int = 0
     reservation_count: int = 0
     occupancy_count: int = 0
+    # 全天合计（各时段相加，可能大于单个时段容量）
+    day_used: int = 0
+    day_parties: int = 0
+    # 时段峰值与对应时段
+    peak_used: int = 0
+    peak_period: str = ""
+    # 当前统计口径对应的时段（"all" 表示取峰值时段）
+    scope_period: str = ""
     by_period: list[dict] = field(default_factory=list)
 
     @property
@@ -74,6 +82,11 @@ class RoomUsage:
             "reservations": int(self.reservation_count),
             "occupancies": int(self.occupancy_count),
             "parties": int(self.party_count),
+            "day_used": int(self.day_used),
+            "day_parties": int(self.day_parties),
+            "peak_used": int(self.peak_used),
+            "peak_period": self.peak_period,
+            "scope_period": self.scope_period,
             "by_period": self.by_period,
         }
 
@@ -89,6 +102,8 @@ def _period_buckets(periods: Sequence) -> dict[str, dict]:
             "seated": 0,
             "used": 0,
             "parties": 0,
+            "reservations": 0,
+            "occupancies": 0,
         }
     return out
 
@@ -104,8 +119,11 @@ def compute_room_usage(
 ) -> RoomUsage:
     """统计房间在 ``reservation_date`` 当天、指定 ``period`` 的座位占用。
 
-    ``period`` 传 ``"all"`` 表示不限时段（统计全天合计）；
-    传具体 ``period_key`` 时只统计该时段。预订与散客合并计算。
+    - ``period`` 传具体 ``period_key``：只统计该时段。
+    - ``period`` 传 ``"all"``：取**时段峰值**作为占用（保证不会因各时段相加
+      而出现「57/30」这种误导），同时在 ``day_used`` 给出全天合计。
+
+    预订与散客合并计算。
     """
     usage = RoomUsage(capacity=int(table.capacity or 0))
     key = (period or "").strip().lower()
@@ -123,6 +141,8 @@ def compute_room_usage(
                 "seated": 0,
                 "used": 0,
                 "parties": 0,
+                "reservations": 0,
+                "occupancies": 0,
             }
             buckets[pk] = b
         return b
@@ -135,14 +155,11 @@ def compute_room_usage(
         if int(table.id) not in parse_assigned_table_ids(r):
             continue
         pk = period_key_for_periods_list(period_list, r.time_slot)
-        if key != "all" and pk != key:
-            continue
         seats = int(r.party_size or 0)
-        usage.reserved_seats += seats
-        usage.reservation_count += 1
         b = bucket_of(pk)
         b["reserved"] += seats
         b["parties"] += 1
+        b["reservations"] += 1
 
     for occ in occupancies:
         if occ.business_date != reservation_date:
@@ -152,18 +169,38 @@ def compute_room_usage(
         if int(occ.table_id) != int(table.id):
             continue
         pk = period_key_for_periods_list(period_list, occ.time_slot)
-        if key != "all" and pk != key:
-            continue
         seats = int(occ.party_size or 0)
-        usage.seated_seats += seats
-        usage.occupancy_count += 1
         b = bucket_of(pk)
         b["seated"] += seats
         b["parties"] += 1
+        b["occupancies"] += 1
 
-    usage.used_seats = usage.reserved_seats + usage.seated_seats
     for b in buckets.values():
         b["used"] = b["reserved"] + b["seated"]
+
+    usage.day_used = sum(int(b["used"]) for b in buckets.values())
+    usage.day_parties = sum(int(b["parties"]) for b in buckets.values())
+    peak = None
+    for b in buckets.values():
+        if peak is None or int(b["used"]) > int(peak["used"]):
+            peak = b
+    if peak is not None:
+        usage.peak_used = int(peak["used"])
+        usage.peak_period = str(peak["period_key"])
+
+    if key == "all":
+        # 全天视图：取峰值时段，避免「各时段相加」超过座位数造成误读
+        scoped = peak
+    else:
+        scoped = buckets.get(key)
+    if scoped is not None:
+        usage.reserved_seats = int(scoped["reserved"])
+        usage.seated_seats = int(scoped["seated"])
+        usage.used_seats = int(scoped["used"])
+        usage.reservation_count = int(scoped["reservations"])
+        usage.occupancy_count = int(scoped["occupancies"])
+        usage.scope_period = str(scoped["period_key"])
+
     usage.by_period = [
         {k: v for k, v in b.items() if k != "sort_order"}
         for b in sorted(buckets.values(), key=lambda x: x["sort_order"])

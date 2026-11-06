@@ -78,6 +78,8 @@ export function AdminReservationsPage() {
   const [dateFrom, setDateFrom] = useState(() => getSp("date_from", "date_from-") || defaultDateFrom);
   const [dateTo, setDateTo] = useState(() => getSp("date_to", "date_to-") || todayYmd);
   const [search, setSearch] = useState(() => getSp("q"));
+  /** 按桌台过滤（来自日历页跳转或手动选择），空=全部 */
+  const [tableCode, setTableCode] = useState(() => getSp("table_code"));
   const [selectedFlowSet, setSelectedFlowSet] = useState<Set<string>>(
     () => new Set(FLOW_FILTER_OPTIONS.map((x) => x.key)),
   );
@@ -217,6 +219,7 @@ export function AdminReservationsPage() {
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
       if (search.trim()) params.set("q", search.trim());
+      if (tableCode.trim()) params.set("table_code", tableCode.trim());
       const data = await apiFetch<ListResp>(`/api/admin/reservations?${params}`);
       setList(data.items);
       setTotal(data.total);
@@ -225,7 +228,7 @@ export function AdminReservationsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, dateFrom, dateTo, search]);
+  }, [page, dateFrom, dateTo, search, tableCode]);
 
   useEffect(() => {
     if (!enabledPeriods.length) {
@@ -753,6 +756,43 @@ export function AdminReservationsPage() {
         >
           今日
         </button>
+        <select
+          value={tableCode}
+          title="按桌台筛选（房间型桌台可查看该房间的所有预订）"
+          aria-label="按桌台筛选"
+          onChange={(e) => {
+            setTableCode(e.target.value);
+            setPage(1);
+            const next = new URLSearchParams(sp);
+            if (e.target.value) next.set("table_code", e.target.value);
+            else next.delete("table_code");
+            setSp(next, { replace: true });
+          }}
+          className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm text-stone-700"
+        >
+          <option value="">全部桌台</option>
+          {tables.map((t) => (
+            <option key={t.code} value={t.code}>
+              {t.label}
+              {t.table_type === "room" ? "（房间）" : ""}
+            </option>
+          ))}
+        </select>
+        {tableCode && (
+          <button
+            type="button"
+            onClick={() => {
+              setTableCode("");
+              setPage(1);
+              const next = new URLSearchParams(sp);
+              next.delete("table_code");
+              setSp(next, { replace: true });
+            }}
+            className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-sm text-indigo-700 hover:bg-indigo-100"
+          >
+            仅看该桌台 · 清除
+          </button>
+        )}
       </div>
 
       {err && <p className="mt-3 text-sm text-red-600">{err}</p>}

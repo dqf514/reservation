@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, or_
+from sqlalchemy import desc, func, literal, or_
 from sqlalchemy.orm import Session, joinedload
 
 from ..customer_util import upsert_customer
@@ -121,6 +121,7 @@ def list_reservations(
     date_from: str | None = None,
     date_to: str | None = None,
     flow_status: str | None = None,
+    table_code: str | None = None,
     db: Session = Depends(get_db),
     _: object = Depends(require_staff),
 ):
@@ -157,6 +158,22 @@ def list_reservations(
             )
         else:
             query = query.filter(Reservation.flow_status == flow_status)
+
+    # 按桌台过滤（含房间型桌台）：多桌台字段是 CSV，用「,id,」精确匹配避免误命中
+    if table_code and table_code.strip():
+        t = db.query(DiningTable).filter(DiningTable.code == table_code.strip()).first()
+        if not t:
+            raise HTTPException(
+                status_code=400, detail=f"桌台编号不存在：{table_code.strip()}"
+            )
+        tid = int(t.id)
+        csv_expr = literal(",") + func.coalesce(Reservation.assigned_table_ids, "") + literal(",")
+        query = query.filter(
+            or_(
+                Reservation.assigned_table_id == tid,
+                csv_expr.like(f"%,{tid},%"),
+            )
+        )
 
     total_count = query.count()
     rows = (

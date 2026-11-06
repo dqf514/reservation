@@ -161,6 +161,23 @@ export function FloorCanvas({
           const { x, y } = displayXY(t);
           const canDrag = Boolean(draggable && onPositionCommit && t.dbId != null);
           const capacityText = t.ratio || (t.capacity ? `0/${t.capacity}` : "");
+          const isRoom = t.tableType === "room";
+          const usage = t.roomUsage;
+          const titleParts: string[] = [];
+          if (t.isLocked) titleParts.push(`已锁定（${t.lockedBy || "未知"}）`);
+          if (isRoom && usage) {
+            titleParts.push(
+              `${t.label} 房间：已占用 ${usage.used}/${usage.capacity} 座（预订 ${usage.reserved} · 散客 ${usage.seated}）· ${usage.parties} 组`,
+            );
+            if (usage.day_used && usage.day_used !== usage.used) {
+              titleParts.push(`全天合计 ${usage.day_used} 人`);
+            }
+            for (const p of usage.by_period ?? []) {
+              if (p.used <= 0) continue;
+              titleParts.push(`${p.label}：${p.used}/${usage.capacity}（${p.parties} 组）`);
+            }
+          }
+          const titleText = titleParts.length ? titleParts.join("\n") : undefined;
           return (
             <button
               key={t.id}
@@ -174,7 +191,7 @@ export function FloorCanvas({
               className={`absolute flex flex-col items-center justify-center p-1 text-center transition-transform hover:z-20 hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-coral ${shape} ${base} ${
                 active ? "ring-2 ring-brand-coral ring-offset-2" : ""
               } ${canDrag ? "cursor-grab active:cursor-grabbing" : ""} ${preview?.id === t.id ? "z-30 scale-105 shadow-lg" : ""}`}
-              title={t.isLocked ? `已锁定（${t.lockedBy || "未知"}）` : undefined}
+              title={titleText}
               style={{
                 left: `${x}%`,
                 top: `${y}%`,
@@ -187,6 +204,11 @@ export function FloorCanvas({
               {t.isLocked && (
                 <span className="pointer-events-none absolute -right-1 -top-1 rounded-full border border-amber-300 bg-amber-100 px-1 text-[10px] font-semibold leading-4 text-amber-800 shadow-sm">
                   锁
+                </span>
+              )}
+              {isRoom && (
+                <span className="pointer-events-none absolute -left-1 -top-1 rounded-full border border-indigo-300 bg-indigo-100 px-1 text-[10px] font-semibold leading-4 text-indigo-700 shadow-sm">
+                  房
                 </span>
               )}
               <span className="max-w-[90%] whitespace-nowrap overflow-hidden text-ellipsis text-[10px] font-bold leading-tight sm:text-[11px]">

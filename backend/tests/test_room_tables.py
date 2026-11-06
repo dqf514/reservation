@@ -252,6 +252,24 @@ def test_room_walkin_allowed_when_seats_available(client, admin_headers, room):
     assert node["status"] == "arrived"
 
 
+def test_room_all_period_uses_peak_not_day_sum(client, admin_headers, room):
+    """全部时段视图取「时段峰值」，不会因各时段相加而看起来超过座位数。"""
+    _mk_reservation(client, admin_headers, code=room["room_code"], party=30, slot="12:00", name="午")
+    _mk_reservation(client, admin_headers, code=room["room_code"], party=27, slot="19:00", name="晚")
+    fl = client.get(
+        f"/api/admin/floor?date={TOMORROW}&period=all", headers=admin_headers
+    )
+    assert fl.status_code == 200, fl.text
+    node = {n["id"]: n for n in fl.json()["tables"]}[room["room_code"]]
+    usage = node["roomUsage"]
+    assert node["ratio"] == "30/30"
+    assert usage["used"] == 30
+    assert usage["peak_used"] == 30
+    assert usage["day_used"] == 57
+    assert usage["day_parties"] == 2
+    assert node["guestHint"] == "2 桌"
+
+
 def test_calendar_by_table_filter(client, admin_headers, room):
     """日历按桌台统计：只含该桌台的预订与散客。"""
     _mk_reservation(client, admin_headers, code=room["room_code"], party=10, name="A")
@@ -283,6 +301,46 @@ def test_calendar_unknown_table_returns_400(client, admin_headers):
         headers=admin_headers,
     )
     assert r.status_code == 400, r.text
+
+
+def test_reservation_list_filters_by_table(client, admin_headers, room):
+    """预订列表可按桌台过滤（多桌台 CSV 精确匹配）。"""
+    _mk_reservation(client, admin_headers, code=room["room_code"], party=10, name="A")
+    _mk_reservation(client, admin_headers, code=room["std_code"], party=2, name="B")
+
+    r = client.get(
+        f"/api/admin/reservations?table_code={room['room_code']}", headers=admin_headers
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 1
+    assert body["items"][0]["customer_name"] == "A"
+
+
+def test_reservation_list_table_filter_no_false_positive(client, admin_headers, room):
+    """桌台 id 存在前缀关系时不应互相误命中（如 65 与 165）。"""
+    other_code = f"{room['room_code']}x"
+    r = client.post(
+        "/api/admin/dining-tables",
+        headers=admin_headers,
+        json={
+            "code": other_code,
+            "label": "干扰桌",
+            "shape": "circle",
+            "pos_x": 20.0,
+            "pos_y": 20.0,
+            "pos_size": 5.0,
+            "capacity": 4,
+        },
+    )
+    assert r.status_code == 200, r.text
+    _mk_reservation(client, admin_headers, code=other_code, party=2, name="X")
+
+    r2 = client.get(
+        f"/api/admin/reservations?table_code={room['room_code']}", headers=admin_headers
+    )
+    assert r2.status_code == 200, r2.text
+    assert all(x["customer_name"] != "X" for x in r2.json()["items"])
 
 
 def test_table_type_can_be_switched(client, admin_headers, room):

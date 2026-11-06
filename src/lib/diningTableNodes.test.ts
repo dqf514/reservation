@@ -16,6 +16,7 @@ describe("diningTableItemsToNodes", () => {
         sort_order: 0,
         capacity: 4,
         is_active: true,
+        table_type: "standard",
       },
     ];
     const nodes = diningTableItemsToNodes(items);
@@ -29,6 +30,7 @@ describe("diningTableItemsToNodes", () => {
       size: 11,
       shape: "circle",
       status: "empty",
+      tableType: "standard",
     });
   });
 
@@ -45,8 +47,28 @@ describe("diningTableItemsToNodes", () => {
         sort_order: 0,
         capacity: 4,
         is_active: false,
+        table_type: "standard",
       },
     ];
     expect(diningTableItemsToNodes(items)[0].status).toBe("unavailable");
+  });
+
+  it("房间型桌台映射为 room", () => {
+    const items: DiningTableItem[] = [
+      {
+        id: 65,
+        code: "5D",
+        label: "5D Room",
+        shape: "rect_v",
+        pos_x: 84,
+        pos_y: 27,
+        pos_size: 10,
+        sort_order: 0,
+        capacity: 30,
+        is_active: true,
+        table_type: "room",
+      },
+    ];
+    expect(diningTableItemsToNodes(items)[0].tableType).toBe("room");
   });
 });
