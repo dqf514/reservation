@@ -1,11 +1,17 @@
 from contextlib import asynccontextmanager
+import logging
 import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .config import UPLOAD_DIR
+from .config import (
+    ALLOWED_ORIGINS,
+    DATABASE_URL,
+    IS_DEFAULT_JWT_SECRET,
+    UPLOAD_DIR,
+)
 from .database import Base, engine, SessionLocal
 from .backup_scheduler import start_backup_scheduler
 from .promotion_sms_sender import start_promotion_sms_worker, stop_promotion_sms_worker
@@ -35,6 +41,12 @@ from .routers import (
 from . import seed
 
 
+logger = logging.getLogger(__name__)
+
+# 内存库 = 测试 / 本地临时环境，不提示生产密钥
+_IS_IN_MEMORY_DB = ":memory:" in (DATABASE_URL or "")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -55,9 +67,15 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="餐厅预订管理 API", version="1.0.0", lifespan=lifespan)
 
+if IS_DEFAULT_JWT_SECRET and not _IS_IN_MEMORY_DB:
+    logger.warning(
+        "严重：JWT_SECRET 仍为默认值 dev-jwt-secret-please-change，"
+        "任何人都可伪造登录令牌。请通过环境变量 JWT_SECRET 配置随机密钥。"
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
