@@ -228,6 +228,21 @@ def test_walkin_occupancy_counts_into_room(client, admin_headers, room):
     assert "座位不足" in r.json()["detail"]
 
 
+def _current_period_key() -> str:
+    """当前时刻所属的运营时段（与后端 period_key_for_time_slot 同规则）。
+
+    避免测试依赖固定时段：无论何时运行，散客入席都落在当前时段。
+    """
+    from app.database import SessionLocal
+    from app.periods import period_key_for_time_slot
+
+    db = SessionLocal()
+    try:
+        return period_key_for_time_slot(db, datetime.now().strftime("%H:%M"))
+    finally:
+        db.close()
+
+
 def test_room_walkin_allowed_when_seats_available(client, admin_headers, room):
     """房间有空位时允许散客直接入席。"""
     r = client.post(
@@ -242,7 +257,8 @@ def test_room_walkin_allowed_when_seats_available(client, admin_headers, room):
     assert r.status_code == 200, r.text
 
     fl = client.get(
-        f"/api/admin/floor?date={TODAY}&period=dinner", headers=admin_headers
+        f"/api/admin/floor?date={TODAY}&period={_current_period_key()}",
+        headers=admin_headers,
     )
     assert fl.status_code == 200, fl.text
     nodes = {n["id"]: n for n in fl.json()["tables"]}

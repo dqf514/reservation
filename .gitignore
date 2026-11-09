@@ -12,3 +12,12 @@ data/
 uploads/
 venv/
 .pytest_cache/
+
+# TypeScript 增量构建产物
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# 本地环境变量 / 密钥
+.env
+.env.*
+*.env
